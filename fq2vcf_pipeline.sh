@@ -289,8 +289,6 @@ else
         -R "$REF" \
         -I "$BAM_BQSR" \
         -O "$VCF_RAW" \
-        -G StandardAnnotation \
-        -G AS_StandardAnnotation \
         --native-pair-hmm-threads "$THREADS" \
         --min-base-quality-score 20 \
         --standard-min-confidence-threshold-for-calling 30 \
