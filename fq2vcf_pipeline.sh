@@ -38,7 +38,7 @@ THREADS=$(nproc)
 PLATFORM="ILLUMINA"
 RG_NAME=""
 GVCF_MODE=false
-SKIP_BQSR=false
+SKIP_BQSR=true
 SKIP_DEDUP=false
 OUTDIR=""
 SAMPLE=""
@@ -106,7 +106,7 @@ done
 [[ -z "$RG_NAME" ]] && RG_NAME="$SAMPLE"
 
 # Check required tools
-for cmd in fastp bwa-mem2 samtools gatk java; do
+for cmd in fastp bwa samtools gatk java; do
     command -v "$cmd" &>/dev/null || err "Required tool not found: $cmd"
 done
 
@@ -168,15 +168,15 @@ STEP_END=$(date +%s)
 ok "Step 1 complete ($(( STEP_END - STEP_START ))s)"
 
 # ============================
-# STEP 2: ALIGN with BWA-MEM2
+# STEP 2: ALIGN with BWA-MEM
 # ============================
-log ">>> STEP 2: Align with BWA-MEM2"
+log ">>> STEP 2: Align with BWA-MEM"
 STEP_START=$(date +%s)
 
-# Check if BWA-MEM2 index exists (look for .01.2bit.amb or .amb)
-if [[ ! -f "${REF}.01.2bit.amb" ]] && [[ ! -f "${REF}.amb" ]]; then
-    log "Building BWA-MEM2 index..."
-    bwa-mem2 index "$REF" 2>&1 | tee -a "$LOG"
+# Check if BWA index exists
+if [[ ! -f "${REF}.bwt" ]]; then
+    log "Building BWA index..."
+    bwa index "$REF" 2>&1 | tee -a "$LOG"
 fi
 
 # Build RG string
@@ -184,7 +184,7 @@ RG="@RG\\tID:${SAMPLE}\\tSM:${SAMPLE}\\tPL:${PLATFORM}\\tLB:${SAMPLE}_lib\\tPU:$
 
 BAM_RAW="${OUTDIR}/align/${SAMPLE}.raw.bam"
 
-bwa-mem2 mem \
+bwa mem \
     -t "$THREADS" \
     -R "$RG" \
     "$REF" \
