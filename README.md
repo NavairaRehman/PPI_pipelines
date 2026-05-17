@@ -23,17 +23,24 @@ conda install -c bioconda -c conda-forge \
 REF_DIR="/data/references"
 mkdir -p "$REF_DIR"
 
-# GRCh38 from GATK bundle
-wget -P "$REF_DIR" https://storage.googleapis.com/genomics-public-data/resources/broad/hg38/v0/Homo_sapiens_assembly38.fasta
-wget -P "$REF_DIR" https://storage.googleapis.com/genomics-public-data/resources/broad/hg38/v0/Homo_sapiens_assembly38.fasta.fai
-wget -P "$REF_DIR" https://storage.googleapis.com/genomics-public-data/resources/broad/hg38/v0/Homo_sapiens_assembly38.dict
+REF_DIR="/data/references"
+mkdir -p "$REF_DIR"
 
-# Known sites for BQSR
-wget -P "$REF_DIR" https://storage.googleapis.com/genomics-public-data/resources/broad/hg38/v0/Homo_sapiens_assembly38.dbsnp138.vcf
-wget -P "$REF_DIR" https://storage.googleapis.com/genomics-public-data/resources/broad/hg38/v0/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz
+# 1. Reference genome (stable source)
+wget -P "$REF_DIR" https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz
+gunzip "$REF_DIR/hg38.fa.gz"
 
-# Build BWA-MEM2 index (~1 hour)
-bwa-mem2 index "$REF_DIR/Homo_sapiens_assembly38.fasta"
+# 2. Build indices locally
+samtools faidx "$REF_DIR/hg38.fa"
+
+gatk CreateSequenceDictionary \
+  -R "$REF_DIR/hg38.fa" \
+  -O "$REF_DIR/hg38.dict"
+
+# 3. BWA index
+bwa-mem2 index "$REF_DIR/hg38.fa"
+
+# 4. Known sites (use GATK bundle or trusted mirror)
 ```
 
 ### 3. Run Pipeline
