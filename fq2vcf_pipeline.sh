@@ -47,6 +47,16 @@ FQ2=""
 REF=""
 KNOWN_DBSNP=""
 KNOWN_MILLS=""
+# ============================
+# ARTIFACT CONTROL FLAGS
+# ============================
+KEEP_FASTP=false
+KEEP_ALIGNED_BAM=false
+KEEP_DEDUP_BAM=false
+KEEP_BQSR_BAM=false
+KEEP_RAW_VCF=true
+KEEP_INTERMEDIATE_VCFS=true
+KEEP_QC=true
 
 # ============================
 # COLOR OUTPUT
@@ -82,6 +92,13 @@ while [[ $# -gt 0 ]]; do
         --threads)    THREADS="$2"; shift 2 ;;
         --platform)   PLATFORM="$2"; shift 2 ;;
         --read-group-name) RG_NAME="$2"; shift 2 ;;
+        --keep-fastp) KEEP_FASTP=true; shift ;;
+        --keep-aligned-bam) KEEP_ALIGNED_BAM=true; shift ;;
+        --keep-dedup-bam) KEEP_DEDUP_BAM=true; shift ;;
+        --keep-bqsr-bam) KEEP_BQSR_BAM=true; shift ;;
+        --keep-raw-vcf) KEEP_RAW_VCF=true; shift ;;
+        --keep-intermediate-vcfs) KEEP_INTERMEDIATE_VCFS=true; shift ;;
+        --keep-qc) KEEP_QC=true; shift ;;
         --gvcf)       GVCF_MODE=true; shift ;;
         --skip-bqsr)  SKIP_BQSR=true; shift ;;
         --skip-dedup) SKIP_DEDUP=true; shift ;;
@@ -408,6 +425,84 @@ ok "Step 7 complete ($(( STEP_END - STEP_START ))s)"
 # ============================
 # CLEANUP INTERMEDIATE FILES (optional)
 # ============================
+# ============================
+# FINAL CLEANUP (ARTIFACT POLICY)
+# ============================
+log ""
+log ">>> FINAL CLEANUP: Applying artifact retention policy"
+
+# if [[ "$GVCF_MODE" == true ]]; then
+#     FINAL_VCF="${OUTDIR}/vcf/${SAMPLE}.g.vcf.gz"
+# else
+#     FINAL_VCF="${OUTDIR}/${SAMPLE}.final.vcf.gz"
+# fi
+
+# Build cleanup list
+CLEANUP_FILES=()
+
+# STEP 1: fastp outputs
+if [[ "$KEEP_FASTP" == false ]]; then
+    CLEANUP_FILES+=(
+        "${OUTDIR}/fastp/${SAMPLE}.R1.trimmed.fastq.gz"
+        "${OUTDIR}/fastp/${SAMPLE}.R2.trimmed.fastq.gz"
+        "${OUTDIR}/fastp/${SAMPLE}.fastp.json"
+        "${OUTDIR}/fastp/${SAMPLE}.fastp.html"
+    )
+fi
+
+# STEP 2: alignment BAM
+if [[ "$KEEP_ALIGNED_BAM" == false ]]; then
+    CLEANUP_FILES+=("${OUTDIR}/align/${SAMPLE}.raw.bam" "${OUTDIR}/align/${SAMPLE}.raw.bam.bai")
+fi
+
+# STEP 3: dedup BAM
+if [[ "$KEEP_DEDUP_BAM" == false ]] && [[ "$SKIP_DEDUP" == false ]]; then
+    CLEANUP_FILES+=("${OUTDIR}/dedup/${SAMPLE}.dedup.bam")
+    CLEANUP_FILES+=("${OUTDIR}/dedup/${SAMPLE}.dedup.bam.bai")
+    CLEANUP_FILES+=("${OUTDIR}/dedup/${SAMPLE}.dedup.metrics")
+fi
+
+# STEP 4: BQSR BAM + recal tables
+if [[ "$KEEP_BQSR_BAM" == false ]] && [[ "$SKIP_BQSR" == false ]]; then
+    CLEANUP_FILES+=(
+        "${OUTDIR}/bqsr/${SAMPLE}.recal.bam"
+        "${OUTDIR}/bqsr/${SAMPLE}.recal.bam.bai"
+        "${OUTDIR}/bqsr/${SAMPLE}.recal.table"
+    )
+fi
+
+# STEP 5–6: intermediate VCFs
+if [[ "$KEEP_INTERMEDIATE_VCFS" == false ]]; then
+    # raw VCF can be controlled separately
+    if [[ "$KEEP_RAW_VCF" == false ]]; then
+        CLEANUP_FILES+=(
+            "${OUTDIR}/vcf/${SAMPLE}.raw.vcf.gz"
+            "${OUTDIR}/vcf/${SAMPLE}.raw.vcf.gz.tbi"
+        )
+    fi
+    CLEANUP_FILES+=(
+        "${OUTDIR}/vcf/${SAMPLE}.raw.snp.vcf.gz"
+        "${OUTDIR}/vcf/${SAMPLE}.raw.indel.vcf.gz"
+        "${OUTDIR}/vcf/${SAMPLE}.filtered.snp.vcf.gz"
+        "${OUTDIR}/vcf/${SAMPLE}.filtered.indel.vcf.gz"
+    )
+fi
+
+# STEP 7: QC retention (optional)
+if [[ "$KEEP_QC" == false ]]; then
+    CLEANUP_FILES+=("${OUTDIR}/qc")
+fi
+
+# Remove files safely
+for f in "${CLEANUP_FILES[@]}"; do
+    if [[ -e "$f" ]]; then
+        rm -rf "$f"
+        log "Removed: $f"
+    fi
+done
+
+log ">>> Cleanup complete."
+
 log ""
 log ">>> Pipeline complete!"
 PIPELINE_END=$(date +%s)
