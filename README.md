@@ -12,7 +12,7 @@ conda create -n fq2vcf -c bioconda -c conda-forge python=3.10
 conda activate fq2vcf
 
 conda install -c bioconda -c conda-forge \
-    bwa-mem2=2.2.1 samtools=1.19 bcftools=1.19 \
+    bwa=0.7.17 samtools=1.19 bcftools=1.19 \
     fastp=0.23.4 gatk4=4.5.0.0 picard=3.1.1 \
     multiqc=1.21
 ```
@@ -20,9 +20,6 @@ conda install -c bioconda -c conda-forge \
 ### 2. Download Reference Genome
 
 ```bash
-REF_DIR="/data/references"
-mkdir -p "$REF_DIR"
-
 REF_DIR="/data/references"
 mkdir -p "$REF_DIR"
 
@@ -38,7 +35,7 @@ gatk CreateSequenceDictionary \
   -O "$REF_DIR/hg38.dict"
 
 # 3. BWA index
-bwa-mem2 index "$REF_DIR/hg38.fa"
+bwa index "$REF_DIR/hg38.fa"
 
 # 4. Known sites (use GATK bundle or trusted mirror)
 ```
@@ -54,6 +51,20 @@ bash fq2vcf_pipeline.sh \
     --ref /data/references/Homo_sapiens_assembly38.fasta \
     --known-dbsnp /data/references/Homo_sapiens_assembly38.dbsnp138.vcf \
     --known-mills /data/references/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz \
+    --enable-bqsr \
+    --outdir /data/output/NA12878 \
+    --threads 16
+```
+
+**Bash script (input BAM):**
+```bash
+bash fq2vcf_pipeline.sh \
+    --sample NA12878 \
+    --bam /data/align/NA12878.bam \
+    --ref /data/references/Homo_sapiens_assembly38.fasta \
+    --known-dbsnp /data/references/Homo_sapiens_assembly38.dbsnp138.vcf \
+    --known-mills /data/references/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz \
+    --enable-bqsr \
     --outdir /data/output/NA12878 \
     --threads 16
 ```
@@ -67,6 +78,20 @@ python fq2vcf.py \
     --ref /data/references/Homo_sapiens_assembly38.fasta \
     --known-dbsnp /data/references/Homo_sapiens_assembly38.dbsnp138.vcf \
     --known-mills /data/references/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz \
+    --enable-bqsr \
+    --outdir /data/output/NA12878 \
+    --threads 16
+```
+
+**Python wrapper (input BAM):**
+```bash
+python fq2vcf.py \
+    --sample NA12878 \
+    --bam /data/align/NA12878.bam \
+    --ref /data/references/Homo_sapiens_assembly38.fasta \
+    --known-dbsnp /data/references/Homo_sapiens_assembly38.dbsnp138.vcf \
+    --known-mills /data/references/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz \
+    --enable-bqsr \
     --outdir /data/output/NA12878 \
     --threads 16
 ```
@@ -76,7 +101,7 @@ python fq2vcf.py \
 | Step | Tool | Purpose |
 |------|------|---------|
 | 1 | `fastp` | Adapter trimming, quality filtering, dedup |
-| 2 | `bwa-mem2` | Alignment to reference genome |
+| 2 | `bwa` | Alignment to reference genome |
 | 3 | `Picard MarkDuplicates` | PCR/optical duplicate flagging |
 | 4 | `GATK BQSR` | Base quality score recalibration |
 | 5 | `GATK HaplotypeCaller` | Variant calling |
@@ -89,16 +114,15 @@ python fq2vcf.py \
 {outdir}/
 ├── {sample}.final.vcf.gz          # Final filtered VCF
 ├── {sample}.final.vcf.gz.tbi      # Tabix index
-├── 01_fastp/                      # Trimmed FASTQs + QC
-├── 02_align/                      # Sorted BAM
-├── 03_dedup/                      # Dedup BAM + metrics
-├── 04_bqsr/                       # Recalibrated BAM
-├── 05_vcf/                        # Raw VCF
-├── 06_filter/                     # Filtered VCF
-├── 07_qc/                         # QC reports
+├── fastp/                         # Trimmed FASTQs + QC
+├── align/                         # Sorted BAM
+├── dedup/                         # Dedup BAM + metrics
+├── bqsr/                          # Recalibrated BAM
+├── vcf/                           # Raw/filtered VCF intermediates
+├── qc/                            # QC reports
 │   ├── multiqc_report.html        # Aggregated QC
 │   └── *.bcftools_stats.txt       # Variant stats
-└── {sample}.pipeline.log          # Full log
+└── pipeline.log                   # Full log
 ```
 
 ## Filter Thresholds
@@ -122,7 +146,10 @@ python fq2vcf.py \
 # Output gVCF for joint calling (multi-sample)
 python fq2vcf.py ... --gvcf
 
-# Skip BQSR (no known sites)
+# Enable BQSR (requires known sites)
+python fq2vcf.py ... --enable-bqsr
+
+# Force-skip BQSR
 python fq2vcf.py ... --skip-bqsr
 
 # Skip duplicate marking
