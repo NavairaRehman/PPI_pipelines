@@ -9,6 +9,7 @@
 #       --sample SAMPLE_ID \
 #       --fq1  /path/to/read1.fastq.gz \
 #       --fq2  /path/to/read2.fastq.gz \
+#       --bam  /path/to/input.bam \
 #       --ref  /path/to/reference.fasta \
 #       --known-dbsnp   /path/to/dbsnp.vcf.gz \
 #       --known-mills   /path/to/Mills_and_1000G.indels.vcf.gz \
@@ -17,7 +18,8 @@
 #       [--platform ILLUMINA] \
 #       [--read-group-name SAMPLE_ID] \
 #       [--gvcf]               # output gVCF for joint calling
-#       [--skip-bqsr]          # skip BQSR (no known-sites files)
+#       [--enable-bqsr]        # enable BQSR (requires known-sites files)
+#       [--skip-bqsr]          # force-skip BQSR
 #       [--skip-dedup]         # skip duplicate marking
 #       [--help]
 #
@@ -47,6 +49,8 @@ FQ2=""
 REF=""
 KNOWN_DBSNP=""
 KNOWN_MILLS=""
+BAM_IN=""
+WORKING_BAM=""
 # ============================
 # ARTIFACT CONTROL FLAGS
 # ============================
@@ -100,9 +104,11 @@ while [[ $# -gt 0 ]]; do
         --keep-intermediate-vcfs) KEEP_INTERMEDIATE_VCFS=true; shift ;;
         --keep-qc) KEEP_QC=true; shift ;;
         --gvcf)       GVCF_MODE=true; shift ;;
+        --enable-bqsr) SKIP_BQSR=false; shift ;;
         --skip-bqsr)  SKIP_BQSR=true; shift ;;
         --skip-dedup) SKIP_DEDUP=true; shift ;;
         --help|-h)    usage ;;
+        --bam)         BAM_IN="$2"; shift 2 ;; # optional input BAM instead of FASTQ
         *)            err "Unknown option: $1" ;;
     esac
 done
@@ -111,25 +117,43 @@ done
 # VALIDATE INPUTS
 # ============================
 [[ -z "$SAMPLE" ]]  && err "Missing --sample"
-[[ -z "$FQ1" ]]     && err "Missing --fq1"
-[[ -z "$FQ2" ]]     && err "Missing --fq2"
 [[ -z "$REF" ]]     && err "Missing --ref"
 [[ -z "$OUTDIR" ]]  && err "Missing --outdir"
 
-[[ ! -f "$FQ1" ]]  && err "FASTQ R1 not found: $FQ1"
-[[ ! -f "$FQ2" ]]  && err "FASTQ R2 not found: $FQ2"
 [[ ! -f "$REF" ]]  && err "Reference not found: $REF"
 
 [[ -z "$RG_NAME" ]] && RG_NAME="$SAMPLE"
 
+# Validate
+if [[ -n "$BAM_IN" ]]; then
+    [[ ! -f "$BAM_IN" ]] && err "BAM not found: $BAM_IN"
+    [[ -n "$FQ1" || -n "$FQ2" ]] && err "Use either --bam or --fq1/--fq2, not both"
+else
+    [[ -z "$FQ1" ]] && err "Missing --fq1"
+    [[ -z "$FQ2" ]] && err "Missing --fq2"
+    [[ ! -f "$FQ1" ]]  && err "FASTQ R1 not found: $FQ1"
+    [[ ! -f "$FQ2" ]]  && err "FASTQ R2 not found: $FQ2"
+fi
+
 # Check required tools
-for cmd in fastp bwa samtools gatk java; do
+for cmd in samtools gatk java bcftools multiqc; do
     command -v "$cmd" &>/dev/null || err "Required tool not found: $cmd"
 done
 
-if [[ "$SKIP_BQSR" == false ]] && [[ -z "$KNOWN_DBSNP" || -z "$KNOWN_MILLS" ]]; then
-    warn "Known-sites files not fully specified. BQSR will be skipped."
-    SKIP_BQSR=true
+if [[ -z "$BAM_IN" ]]; then
+    for cmd in fastp bwa; do
+        command -v "$cmd" &>/dev/null || err "Required tool not found: $cmd"
+    done
+fi
+
+if [[ "$SKIP_BQSR" == false ]]; then
+    if [[ -z "$KNOWN_DBSNP" || -z "$KNOWN_MILLS" ]]; then
+        warn "Known-sites files not fully specified. BQSR will be skipped."
+        SKIP_BQSR=true
+    else
+        [[ ! -f "$KNOWN_DBSNP" ]] && err "Known-sites file not found: $KNOWN_DBSNP"
+        [[ ! -f "$KNOWN_MILLS" ]] && err "Known-sites file not found: $KNOWN_MILLS"
+    fi
 fi
 
 # ============================
@@ -141,8 +165,12 @@ mkdir -p "$OUTDIR"/{fastp,align,dedup,bqsr,vcf,qc}
 LOG="${OUTDIR}/pipeline.log"
 echo "=== fq2vcf Pipeline ===" > "$LOG"
 log "Sample:    $SAMPLE"
-log "FASTQ R1:  $FQ1"
-log "FASTQ R2:  $FQ2"
+if [[ -n "$BAM_IN" ]]; then
+    log "Input BAM: $BAM_IN"
+else
+    log "FASTQ R1:  $FQ1"
+    log "FASTQ R2:  $FQ2"
+fi
 log "Reference: $REF"
 log "Threads:   $THREADS"
 log "Output:    $OUTDIR"
@@ -153,68 +181,100 @@ log ""
 # Record start time
 PIPELINE_START=$(date +%s)
 
-# ============================
-# STEP 1: QC & TRIM with fastp
-# ============================
-log ">>> STEP 1: QC & Trim with fastp"
-STEP_START=$(date +%s)
+if [[ -n "$BAM_IN" ]]; then
+    log ">>> STEP 1: Prepare input BAM"
+    STEP_START=$(date +%s)
 
-FASTP_R1="${OUTDIR}/fastp/${SAMPLE}.R1.trimmed.fastq.gz"
-FASTP_R2="${OUTDIR}/fastp/${SAMPLE}.R2.trimmed.fastq.gz"
+    BAM_PREP="${OUTDIR}/align/${SAMPLE}.input.sorted.bam"
+    samtools sort -@ "$((THREADS / 2))" -o "$BAM_PREP" "$BAM_IN" 2>&1 | tee -a "$LOG"
+    samtools index -@ "$((THREADS / 2))" "$BAM_PREP"
 
-fastp \
-    --in1 "$FQ1" \
-    --in2 "$FQ2" \
-    --out1 "$FASTP_R1" \
-    --out2 "$FASTP_R2" \
-    --json "${OUTDIR}/fastp/${SAMPLE}.fastp.json" \
-    --html "${OUTDIR}/fastp/${SAMPLE}.fastp.html" \
-    --thread "$THREADS" \
-    --detect_adapter_for_pe \
-    --qualified_quality_phred 20 \
-    --length_required 50 \
-    --correction \
-    --cut_front \
-    --cut_tail \
-    --cut_window_size 4 \
-    --cut_mean_quality 20 \
-    --overrepresentation_analysis \
-    2>&1 | tee -a "$LOG"
+    if samtools view -H "$BAM_PREP" | grep -q '^@RG'; then
+        BAM_RAW="$BAM_PREP"
+    else
+        BAM_RAW="${OUTDIR}/align/${SAMPLE}.raw.bam"
+        gatk AddOrReplaceReadGroups \
+            -I "$BAM_PREP" \
+            -O "$BAM_RAW" \
+            -RGID "$RG_NAME" \
+            -RGLB "${SAMPLE}_lib" \
+            -RGPL "$PLATFORM" \
+            -RGPU "${SAMPLE}_unit" \
+            -RGSM "$SAMPLE" \
+            --CREATE_INDEX true \
+            2>&1 | tee -a "$LOG"
+    fi
 
-STEP_END=$(date +%s)
-ok "Step 1 complete ($(( STEP_END - STEP_START ))s)"
+    WORKING_BAM="$BAM_RAW"
 
-# ============================
-# STEP 2: ALIGN with BWA-MEM
-# ============================
-log ">>> STEP 2: Align with BWA-MEM"
-STEP_START=$(date +%s)
+    STEP_END=$(date +%s)
+    ok "Step 1 complete ($(( STEP_END - STEP_START ))s)"
+else
+    # ============================
+    # STEP 1: QC & TRIM with fastp
+    # ============================
+    log ">>> STEP 1: QC & Trim with fastp"
+    STEP_START=$(date +%s)
 
-# Check if BWA index exists
-if [[ ! -f "${REF}.bwt" ]]; then
-    log "Building BWA index..."
-    bwa index "$REF" 2>&1 | tee -a "$LOG"
+    FASTP_R1="${OUTDIR}/fastp/${SAMPLE}.R1.trimmed.fastq.gz"
+    FASTP_R2="${OUTDIR}/fastp/${SAMPLE}.R2.trimmed.fastq.gz"
+
+    fastp \
+        --in1 "$FQ1" \
+        --in2 "$FQ2" \
+        --out1 "$FASTP_R1" \
+        --out2 "$FASTP_R2" \
+        --json "${OUTDIR}/fastp/${SAMPLE}.fastp.json" \
+        --html "${OUTDIR}/fastp/${SAMPLE}.fastp.html" \
+        --thread "$THREADS" \
+        --detect_adapter_for_pe \
+        --qualified_quality_phred 20 \
+        --length_required 50 \
+        --correction \
+        --cut_front \
+        --cut_tail \
+        --cut_window_size 4 \
+        --cut_mean_quality 20 \
+        --overrepresentation_analysis \
+        2>&1 | tee -a "$LOG"
+
+    STEP_END=$(date +%s)
+    ok "Step 1 complete ($(( STEP_END - STEP_START ))s)"
+
+    # ============================
+    # STEP 2: ALIGN with BWA-MEM
+    # ============================
+    log ">>> STEP 2: Align with BWA-MEM"
+    STEP_START=$(date +%s)
+
+    # Check if BWA index exists
+    if [[ ! -f "${REF}.bwt" ]]; then
+        log "Building BWA index..."
+        bwa index "$REF" 2>&1 | tee -a "$LOG"
+    fi
+
+    # Build RG string
+    RG="@RG\\tID:${SAMPLE}\\tSM:${SAMPLE}\\tPL:${PLATFORM}\\tLB:${SAMPLE}_lib\\tPU:${SAMPLE}_unit"
+
+    BAM_RAW="${OUTDIR}/align/${SAMPLE}.raw.bam"
+
+    bwa mem \
+        -t "$THREADS" \
+        -R "$RG" \
+        "$REF" \
+        "$FASTP_R1" \
+        "$FASTP_R2" \
+        2>> "$LOG" \
+        | samtools view -@ "$((THREADS / 2))" -bS - \
+        | samtools sort -@ "$((THREADS / 2))" -m 4G -o "$BAM_RAW" -
+
+    samtools index -@ "$((THREADS / 2))" "$BAM_RAW"
+
+    WORKING_BAM="$BAM_RAW"
+
+    STEP_END=$(date +%s)
+    ok "Step 2 complete ($(( STEP_END - STEP_START ))s)"
 fi
-
-# Build RG string
-RG="@RG\\tID:${SAMPLE}\\tSM:${SAMPLE}\\tPL:${PLATFORM}\\tLB:${SAMPLE}_lib\\tPU:${SAMPLE}_unit"
-
-BAM_RAW="${OUTDIR}/align/${SAMPLE}.raw.bam"
-
-bwa mem \
-    -t "$THREADS" \
-    -R "$RG" \
-    "$REF" \
-    "$FASTP_R1" \
-    "$FASTP_R2" \
-    2>> "$LOG" \
-    | samtools view -@ "$((THREADS / 2))" -bS - \
-    | samtools sort -@ "$((THREADS / 2))" -m 4G -o "$BAM_RAW" -
-
-samtools index -@ "$((THREADS / 2))" "$BAM_RAW"
-
-STEP_END=$(date +%s)
-ok "Step 2 complete ($(( STEP_END - STEP_START ))s)"
 
 # ============================
 # STEP 3: MARK DUPLICATES
@@ -227,7 +287,7 @@ if [[ "$SKIP_DEDUP" == false ]]; then
     METRICS="${OUTDIR}/dedup/${SAMPLE}.dedup.metrics"
 
     gatk MarkDuplicates \
-        -I "$BAM_RAW" \
+        -I "$WORKING_BAM" \
         -O "$BAM_DEDUP" \
         -M "$METRICS" \
         --CREATE_INDEX true \
@@ -237,9 +297,10 @@ if [[ "$SKIP_DEDUP" == false ]]; then
 
     STEP_END=$(date +%s)
     ok "Step 3 complete ($(( STEP_END - STEP_START ))s)"
+    WORKING_BAM="$BAM_DEDUP"
 else
     log ">>> STEP 3: Skipped (duplicate marking disabled)"
-    BAM_DEDUP="$BAM_RAW"
+    BAM_DEDUP="$WORKING_BAM"
 fi
 
 # ============================
@@ -260,7 +321,7 @@ if [[ "$SKIP_BQSR" == false ]]; then
     # Step 4a: Build recalibration model
     gatk BaseRecalibrator \
         -R "$REF" \
-        -I "$BAM_DEDUP" \
+        -I "$WORKING_BAM" \
         $KNOWN_ARGS \
         -O "$RECAL_TABLE" \
         2>&1 | tee -a "$LOG"
@@ -268,7 +329,7 @@ if [[ "$SKIP_BQSR" == false ]]; then
     # Step 4b: Apply recalibration
     gatk ApplyBQSR \
         -R "$REF" \
-        -I "$BAM_DEDUP" \
+        -I "$WORKING_BAM" \
         -bqsr "$RECAL_TABLE" \
         -O "$BAM_BQSR" \
         --create-output-bam-index true \
@@ -276,9 +337,10 @@ if [[ "$SKIP_BQSR" == false ]]; then
 
     STEP_END=$(date +%s)
     ok "Step 4 complete ($(( STEP_END - STEP_START ))s)"
+    WORKING_BAM="$BAM_BQSR"
 else
     log ">>> STEP 4: Skipped (BQSR disabled)"
-    BAM_BQSR="$BAM_DEDUP"
+    BAM_BQSR="$WORKING_BAM"
 fi
 
 # ============================
@@ -291,7 +353,7 @@ if [[ "$GVCF_MODE" == true ]]; then
     VCF_OUT="${OUTDIR}/vcf/${SAMPLE}.g.vcf.gz"
     gatk HaplotypeCaller \
         -R "$REF" \
-        -I "$BAM_BQSR" \
+        -I "$WORKING_BAM" \
         -O "$VCF_OUT" \
         -ERC GVCF \
         -G StandardAnnotation \
@@ -304,7 +366,7 @@ else
     VCF_RAW="${OUTDIR}/vcf/${SAMPLE}.raw.vcf.gz"
     gatk HaplotypeCaller \
         -R "$REF" \
-        -I "$BAM_BQSR" \
+        -I "$WORKING_BAM" \
         -O "$VCF_RAW" \
         --native-pair-hmm-threads "$THREADS" \
         --min-base-quality-score 20 \
@@ -389,17 +451,17 @@ log ">>> STEP 7: Generate QC Metrics"
 STEP_START=$(date +%s)
 
 # samtools flagstat
-samtools flagstat -@ "$THREADS" "$BAM_BQSR" > "${OUTDIR}/qc/${SAMPLE}.flagstat.txt"
+samtools flagstat -@ "$THREADS" "$WORKING_BAM" > "${OUTDIR}/qc/${SAMPLE}.flagstat.txt"
 
 # samtools idxstats
-samtools idxstats -@ "$THREADS" "$BAM_BQSR" > "${OUTDIR}/qc/${SAMPLE}.idxstats.txt"
+samtools idxstats -@ "$THREADS" "$WORKING_BAM" > "${OUTDIR}/qc/${SAMPLE}.idxstats.txt"
 
 # samtools stats
-samtools stats -@ "$THREADS" "$BAM_BQSR" > "${OUTDIR}/qc/${SAMPLE}.samtools_stats.txt"
+samtools stats -@ "$THREADS" "$WORKING_BAM" > "${OUTDIR}/qc/${SAMPLE}.samtools_stats.txt"
 
 # CollectInsertSizeMetrics (Picard)
 gatk CollectInsertSizeMetrics \
-    -I "$BAM_BQSR" \
+    -I "$WORKING_BAM" \
     -O "${OUTDIR}/qc/${SAMPLE}.insert_size_metrics.txt" \
     -H "${OUTDIR}/qc/${SAMPLE}.insert_size_histogram.pdf" \
     2>&1 | tee -a "$LOG" || warn "InsertSizeMetrics failed (non-critical)"
