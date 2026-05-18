@@ -376,7 +376,7 @@ if [[ "$GVCF_MODE" == false ]]; then
         2>&1 | tee -a "$LOG"
 
     # Index final VCF
-    bcftools index "$VCF_FINAL"
+    bcftools index --tbi "$VCF_FINAL"
 
     STEP_END=$(date +%s)
     ok "Step 6 complete ($(( STEP_END - STEP_START ))s)"
@@ -501,6 +501,19 @@ for f in "${CLEANUP_FILES[@]}"; do
     fi
 done
 
+# Remove empty intermediate directories
+for dir in fastp align dedup bqsr vcf qc; do
+    TARGET_DIR="${OUTDIR}/${dir}"
+
+    if [[ -d "$TARGET_DIR" ]]; then
+        # remove directory if empty
+        if [[ -z "$(find "$TARGET_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+            rmdir "$TARGET_DIR" 2>/dev/null || true
+            log "Removed empty directory: $TARGET_DIR"
+        fi
+    fi
+done
+
 log ">>> Cleanup complete."
 
 log ""
@@ -517,8 +530,13 @@ else
     log "  VCF:        ${OUTDIR}/${SAMPLE}.final.vcf.gz"
     log "  VCF index:  ${OUTDIR}/${SAMPLE}.final.vcf.gz.tbi"
 fi
-log "  QC report:  ${OUTDIR}/qc/multiqc_report.html"
-log "  BAM:        ${BAM_BQSR}"
+if [[ "$KEEP_QC" == true ]]; then
+    log "  QC report:  ${OUTDIR}/qc/multiqc_report.html"
+fi
+
+if [[ "$KEEP_BQSR_BAM" == true ]]; then
+    log "  BAM:        ${BAM_BQSR}"
+fi
 log "  Log:        ${OUTDIR}/pipeline.log"
 log ""
 
