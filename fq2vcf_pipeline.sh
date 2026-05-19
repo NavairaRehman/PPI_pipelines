@@ -438,7 +438,7 @@ if [[ "$GVCF_MODE" == false ]]; then
         2>&1 | tee -a "$LOG"
 
     # Index final VCF
-    bcftools index --tbi "$VCF_FINAL"
+    bcftools index --tbi -f "$VCF_FINAL"
 
     STEP_END=$(date +%s)
     ok "Step 6 complete ($(( STEP_END - STEP_START ))s)"
