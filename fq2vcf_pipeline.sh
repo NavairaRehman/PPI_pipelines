@@ -430,15 +430,21 @@ if [[ "$GVCF_MODE" == false ]]; then
         --filter-expression "ReadPosRankSum < -20.0"                --filter-name "LowReadPosRankSum" \
         2>&1 | tee -a "$LOG"
 
-    # 6e: Merge filtered SNPs and INDELs
-    gatk MergeVcfs \
-        -I "$VCF_SNP_FILT" \
-        -I "$VCF_INDEL_FILT" \
-        -O "$VCF_FINAL" \
-        2>&1 | tee -a "$LOG"
+    # 6e: Combine filtered SNPs and INDELs, then sort final VCF
+    # GATK MergeVcfs can fail here because SNP and INDEL files overlap by genomic position.
+    # bcftools concat -a allows overlaps, and bcftools sort guarantees final coordinate order.
+    bcftools concat -a \
+        "$VCF_SNP_FILT" \
+        "$VCF_INDEL_FILT" \
+        -Ou \
+        2>> "$LOG" \
+        | bcftools sort \
+            -Oz \
+            -o "$VCF_FINAL" \
+            2>&1 | tee -a "$LOG"
 
     # Index final VCF
-    bcftools index --tbi -f "$VCF_FINAL"
+    bcftools index --tbi -f "$VCF_FINAL" 2>&1 | tee -a "$LOG"
 
     STEP_END=$(date +%s)
     ok "Step 6 complete ($(( STEP_END - STEP_START ))s)"
@@ -544,9 +550,13 @@ if [[ "$KEEP_INTERMEDIATE_VCFS" == false ]]; then
     fi
     CLEANUP_FILES+=(
         "${OUTDIR}/vcf/${SAMPLE}.raw.snp.vcf.gz"
+        "${OUTDIR}/vcf/${SAMPLE}.raw.snp.vcf.gz.tbi"
         "${OUTDIR}/vcf/${SAMPLE}.raw.indel.vcf.gz"
+        "${OUTDIR}/vcf/${SAMPLE}.raw.indel.vcf.gz.tbi"
         "${OUTDIR}/vcf/${SAMPLE}.filtered.snp.vcf.gz"
+        "${OUTDIR}/vcf/${SAMPLE}.filtered.snp.vcf.gz.tbi"
         "${OUTDIR}/vcf/${SAMPLE}.filtered.indel.vcf.gz"
+        "${OUTDIR}/vcf/${SAMPLE}.filtered.indel.vcf.gz.tbi"
     )
 fi
 
